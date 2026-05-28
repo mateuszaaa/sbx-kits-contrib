@@ -33,6 +33,34 @@ func TestValidateManifest(t *testing.T) {
 		require.ErrorContains(t, ValidateManifest(&m), "schemaVersion")
 	})
 
+	t.Run("schema_version_1_accepted", func(t *testing.T) {
+		// "1" is the legacy schema version and must keep validating so
+		// existing kits in the wild continue to load after the bump.
+		m := valid
+		m.SchemaVersion = "1"
+		require.NoError(t, ValidateManifest(&m))
+	})
+
+	t.Run("schema_version_2_accepted", func(t *testing.T) {
+		// "2" opts a kit into the v2 OCI distribution format at pack
+		// time. The spec library accepts it; downstream tooling reads
+		// the value to decide which OCI format to emit.
+		m := valid
+		m.SchemaVersion = "2"
+		require.NoError(t, ValidateManifest(&m))
+	})
+
+	t.Run("unsupported_schema_version", func(t *testing.T) {
+		// Anything outside SupportedSchemaVersions must hard-fail with a
+		// message that names the value seen and the values accepted, so
+		// kit authors can spot a typo without grepping the spec library.
+		m := valid
+		m.SchemaVersion = "99"
+		err := ValidateManifest(&m)
+		require.ErrorContains(t, err, "unsupported schemaVersion")
+		require.ErrorContains(t, err, `"99"`)
+	})
+
 	t.Run("missing_kind", func(t *testing.T) {
 		m := valid
 		m.Kind = ""
@@ -66,10 +94,22 @@ func TestValidateManifest(t *testing.T) {
 		require.ErrorContains(t, ValidateManifest(&m), "template is required")
 	})
 
-	t.Run("invalid_persistence", func(t *testing.T) {
+	t.Run("resources_valid", func(t *testing.T) {
 		m := valid
-		m.Persistence = "something-else"
-		require.ErrorContains(t, ValidateManifest(&m), "invalid persistence")
+		m.Resources = &Resources{CPU: 2.5, MemoryMB: 4096, GPU: "1"}
+		require.NoError(t, ValidateManifest(&m))
+	})
+
+	t.Run("resources_negative_cpu", func(t *testing.T) {
+		m := valid
+		m.Resources = &Resources{CPU: -1}
+		require.ErrorContains(t, ValidateManifest(&m), "cpu must be non-negative")
+	})
+
+	t.Run("resources_negative_memory", func(t *testing.T) {
+		m := valid
+		m.Resources = &Resources{MemoryMB: -1}
+		require.ErrorContains(t, ValidateManifest(&m), "memoryMB must be non-negative")
 	})
 }
 
@@ -195,33 +235,109 @@ func TestValidateCommandsPolicy(t *testing.T) {
 		}
 		require.ErrorContains(t, ValidateCommandsPolicy(c), "command is required")
 	})
+
+	t.Run("valid_initfile_mode", func(t *testing.T) {
+		c := &CommandsPolicy{
+			InitFiles: []InitFile{{Path: "/tmp/f", Content: "x", Mode: "0644"}},
+		}
+		require.NoError(t, ValidateCommandsPolicy(c))
+	})
+
+	t.Run("invalid_initfile_mode", func(t *testing.T) {
+		c := &CommandsPolicy{
+			InitFiles: []InitFile{{Path: "/tmp/f", Content: "x", Mode: "rwx"}},
+		}
+		require.ErrorContains(t, ValidateCommandsPolicy(c), "must be octal")
+	})
 }
 
 func TestValidateVolumes(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
-		require.NoError(t, ValidateVolumes(map[string]string{"/data": "size=4G"}))
+		require.NoError(t, ValidateVolumes([]MountSpec{{Path: "/data", Size: "4g", Mode: "0755"}}))
+	})
+
+	t.Run("path_only_is_valid", func(t *testing.T) {
+		require.NoError(t, ValidateVolumes([]MountSpec{{Path: "/data"}}))
 	})
 
 	t.Run("empty_path", func(t *testing.T) {
-		require.ErrorContains(t, ValidateVolumes(map[string]string{"": ""}), "must not be empty")
+		require.ErrorContains(t, ValidateVolumes([]MountSpec{{Path: ""}}), "volumes[0].path must not be empty")
 	})
 
 	t.Run("relative_path", func(t *testing.T) {
-		require.ErrorContains(t, ValidateVolumes(map[string]string{"data": ""}), "must be an absolute path")
+		require.ErrorContains(t, ValidateVolumes([]MountSpec{{Path: "data"}}), "volumes[0].path \"data\" must be an absolute path")
+	})
+
+	t.Run("invalid_size", func(t *testing.T) {
+		require.ErrorContains(t, ValidateVolumes([]MountSpec{{Path: "/data", Size: "huge"}}), "volumes[0].size \"huge\" is not a valid size")
+	})
+
+	t.Run("invalid_mode", func(t *testing.T) {
+		require.ErrorContains(t, ValidateVolumes([]MountSpec{{Path: "/data", Mode: "rwx"}}), "volumes[0].mode \"rwx\" must be octal")
 	})
 }
 
 func TestValidateTmpfs(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
-		require.NoError(t, ValidateTmpfs(map[string]string{"/tmp": "size=1G"}))
+		require.NoError(t, ValidateTmpfs([]MountSpec{{Path: "/tmp", Size: "1g", Mode: "1777"}}))
+	})
+
+	t.Run("path_only_is_valid", func(t *testing.T) {
+		require.NoError(t, ValidateTmpfs([]MountSpec{{Path: "/tmp"}}))
 	})
 
 	t.Run("empty_path", func(t *testing.T) {
-		require.ErrorContains(t, ValidateTmpfs(map[string]string{"": ""}), "must not be empty")
+		require.ErrorContains(t, ValidateTmpfs([]MountSpec{{Path: ""}}), "tmpfs[0].path must not be empty")
 	})
 
 	t.Run("relative_path", func(t *testing.T) {
-		require.ErrorContains(t, ValidateTmpfs(map[string]string{"tmp": ""}), "must be an absolute path")
+		require.ErrorContains(t, ValidateTmpfs([]MountSpec{{Path: "tmp"}}), "tmpfs[0].path \"tmp\" must be an absolute path")
+	})
+
+	t.Run("invalid_size", func(t *testing.T) {
+		require.ErrorContains(t, ValidateTmpfs([]MountSpec{{Path: "/tmp", Size: "huge"}}), "tmpfs[0].size \"huge\" is not a valid size")
+	})
+
+	t.Run("invalid_mode", func(t *testing.T) {
+		require.ErrorContains(t, ValidateTmpfs([]MountSpec{{Path: "/tmp", Mode: "rwx"}}), "tmpfs[0].mode \"rwx\" must be octal")
+	})
+}
+
+func TestValidateLocked(t *testing.T) {
+	t.Run("nil_is_valid", func(t *testing.T) {
+		require.NoError(t, ValidateLocked(nil))
+	})
+
+	t.Run("simple_paths", func(t *testing.T) {
+		require.NoError(t, ValidateLocked([]string{"agent.image", "network.allowedDomains"}))
+	})
+
+	t.Run("single_segment_is_valid", func(t *testing.T) {
+		require.NoError(t, ValidateLocked([]string{"memory"}))
+	})
+
+	t.Run("empty_entry", func(t *testing.T) {
+		require.ErrorContains(t, ValidateLocked([]string{""}), "must not be empty")
+	})
+
+	t.Run("leading_dot", func(t *testing.T) {
+		require.ErrorContains(t, ValidateLocked([]string{".image"}), "not a well-formed dotted path")
+	})
+
+	t.Run("trailing_dot", func(t *testing.T) {
+		require.ErrorContains(t, ValidateLocked([]string{"agent."}), "not a well-formed dotted path")
+	})
+
+	t.Run("double_dot", func(t *testing.T) {
+		require.ErrorContains(t, ValidateLocked([]string{"agent..image"}), "not a well-formed dotted path")
+	})
+
+	t.Run("disallowed_chars", func(t *testing.T) {
+		require.ErrorContains(t, ValidateLocked([]string{"agent.image[0]"}), "not a well-formed dotted path")
+	})
+
+	t.Run("duplicate", func(t *testing.T) {
+		require.ErrorContains(t, ValidateLocked([]string{"agent.image", "agent.image"}), "duplicated")
 	})
 }
 

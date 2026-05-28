@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -74,7 +75,22 @@ func LoadFromFS(fsys fs.FS, dir string) (*Artifact, error) {
 	return artifact, nil
 }
 
-// parseArtifact parses a spec.yaml (or spec.yml) file from an artifact source.
+// LoadFromBytes parses spec.yaml bytes into an Artifact, leaving Files
+// unset and skipping validation. Intended for callers that obtain the
+// spec.yaml separately from the file payload — e.g., the v2 OCI puller,
+// which reads spec.yaml from the manifest's config blob and the files
+// from a tar layer.
+//
+// Callers must populate Artifact.Files from their own source and then
+// call ValidateArtifact to verify the result. LoadFromDirectory and
+// LoadFromFS do this automatically; LoadFromBytes does not because it
+// has no notion of a file source.
+func LoadFromBytes(yamlBytes []byte) (*Artifact, error) {
+	return parseArtifactBytes(yamlBytes)
+}
+
+// parseArtifact reads spec.yaml (or spec.yml as fallback) via readFile and
+// delegates to parseArtifactBytes.
 func parseArtifact(readFile func(string) ([]byte, error)) (*Artifact, error) {
 	data, err := readFile(specFileName)
 	if err != nil {
@@ -83,9 +99,24 @@ func parseArtifact(readFile func(string) ([]byte, error)) (*Artifact, error) {
 			return nil, fmt.Errorf("artifact: %s (or %s) is required: %w", specFileName, specFileNameAlt, err)
 		}
 	}
+	return parseArtifactBytes(data)
+}
 
+// parseArtifactBytes decodes spec.yaml bytes and applies normalization.
+// It does not validate; callers that need a validated Artifact must call
+// ValidateArtifact themselves (LoadFromDirectory and LoadFromFS already
+// do, after populating Files).
+func parseArtifactBytes(data []byte) (*Artifact, error) {
 	var spec specFile
-	if err := yaml.Unmarshal(data, &spec); err != nil {
+	// Strict decoding: unknown top-level (or nested) yaml keys are a hard
+	// error. The schema is documented and small enough that any unrecognised
+	// key is almost always a typo or a stale field the kit author hasn't
+	// migrated yet. Surfacing it loudly is the whole point — yaml.Unmarshal
+	// would silently drop the key and let the author think their kit was
+	// being honoured.
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&spec); err != nil {
 		return nil, fmt.Errorf("artifact: invalid %s: %w", specFileName, err)
 	}
 
@@ -96,6 +127,7 @@ func parseArtifact(readFile func(string) ([]byte, error)) (*Artifact, error) {
 	return &Artifact{
 		Manifest:    spec.Manifest,
 		Extends:     spec.Extends,
+		Locked:      spec.Locked,
 		Network:     spec.Network,
 		Credentials: spec.Credentials,
 		Environment: spec.Environment,

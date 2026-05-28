@@ -7,8 +7,21 @@
 // based) and the internal sandboxes engine.
 package spec
 
-// Supported schema version for kit artifacts.
+// SchemaVersion is the default schemaVersion used when a tool scaffolds
+// a new kit. Stays at "1" while sbx releases v2-capable engines into
+// the field; flip to "2" once enough consumers can read v2 artifacts to
+// make it safe as a default. Authors who want v2 today set schemaVersion:
+// "2" in their spec.yaml explicitly.
 const SchemaVersion = "1"
+
+// SupportedSchemaVersions enumerates every schemaVersion value the
+// loader accepts. "1" is the legacy shape (the current default); "2"
+// opts the kit into the v2 OCI artifact format at distribution time —
+// the spec fields themselves are unchanged across the two versions.
+//
+// New entries should be appended (never reordered) so existing kits
+// continue to validate.
+var SupportedSchemaVersions = []string{"1", "2"}
 
 // Kind constants for manifest types.
 const (
@@ -19,15 +32,6 @@ const (
 	// KindMixin defines an extension that adds capabilities.
 	// Multiple mixins can coexist in a single sandbox.
 	KindMixin = "mixin"
-)
-
-// Persistence constants for volume management.
-const (
-	// PersistenceEphemeral means no persistent state is kept (default).
-	PersistenceEphemeral = "ephemeral"
-
-	// PersistencePersistent means agent state is stored in named Docker volumes.
-	PersistencePersistent = "persistent"
 )
 
 // ArtifactFile target constants.
@@ -50,11 +54,21 @@ type Manifest struct {
 	// Name is a unique identifier (lowercase, alphanumeric + hyphens).
 	Name string `json:"name" yaml:"name"`
 
+	// Version is the kit's release version (e.g. "1.0", "2.3.1"). Optional;
+	// when set, it is the source for the OCI annotation
+	// vnd.docker.sandbox.kit.version at pack time.
+	Version string `json:"version,omitempty" yaml:"version,omitempty"`
+
 	// DisplayName is a human-readable name for display purposes.
 	DisplayName string `json:"displayName,omitempty" yaml:"displayName,omitempty"`
 
 	// Description is a short description of the agent or mixin.
 	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+
+	// SourceURL is an optional URL to the kit's source repository or
+	// documentation. When set, it is the source for the standard OCI
+	// annotation org.opencontainers.image.source at pack time.
+	SourceURL string `json:"sourceURL,omitempty" yaml:"sourceURL,omitempty"`
 
 	// Binary is the executable binary name to run in the container.
 	// Required for kind "agent", not used for kind "mixin".
@@ -70,26 +84,56 @@ type Manifest struct {
 	// RunOptions are CLI arguments passed to the agent binary at startup.
 	RunOptions []string `json:"runOptions,omitempty" yaml:"runOptions,omitempty"`
 
-	// KitDir is the directory under the workspace where kit files are stored.
-	KitDir string `json:"kitDir,omitempty" yaml:"kitDir,omitempty"`
-
-	// Persistence controls volume management: "persistent" or "ephemeral" (default).
-	Persistence string `json:"persistence,omitempty" yaml:"persistence,omitempty"`
+	// Resources optionally constrains container CPU, memory, and GPU.
+	Resources *Resources `json:"resources,omitempty" yaml:"resources,omitempty"`
 
 	// Security defines container security settings.
 	Security *Security `json:"security,omitempty" yaml:"security,omitempty"`
 
-	// Volumes maps container paths to volume options.
-	Volumes map[string]string `json:"volumes,omitempty" yaml:"volumes,omitempty"`
+	// Volumes are block-volume mounts in dash-style list form. Entries are
+	// applied by Path.
+	Volumes []MountSpec `json:"volumes,omitempty" yaml:"volumes,omitempty"`
 
-	// Tmpfs maps container paths to tmpfs mount options.
-	Tmpfs map[string]string `json:"tmpfs,omitempty" yaml:"tmpfs,omitempty"`
+	// Tmpfs are tmpfs mounts in dash-style list form. Entries are applied
+	// by Path.
+	Tmpfs []MountSpec `json:"tmpfs,omitempty" yaml:"tmpfs,omitempty"`
 }
 
 // Security defines container security settings for the sandbox.
 type Security struct {
 	// Privileged runs the container in privileged mode.
 	Privileged bool `json:"privileged,omitempty" yaml:"privileged,omitempty"`
+}
+
+// MountSpec is a single mount entry shared by Manifest.Volumes (persistent
+// block volumes) and Manifest.Tmpfs (in-memory tmpfs). The fields are
+// identical; the semantic distinction lives on the field that holds the
+// slice, not on the entry type.
+type MountSpec struct {
+	// Path is the absolute mount path in the container.
+	Path string `json:"path" yaml:"path"`
+
+	// Size is the mount size as a byte-size string (e.g., "100m", "4g",
+	// "512m"). Optional.
+	Size string `json:"size,omitempty" yaml:"size,omitempty"`
+
+	// Mode is the mount mode in octal (e.g., "1777"). Optional.
+	Mode string `json:"mode,omitempty" yaml:"mode,omitempty"`
+}
+
+// Resources describes optional container resource limits. All fields are
+// optional; an unset field means "no constraint from the spec".
+type Resources struct {
+	// CPU is the number of CPU cores. Fractional values are allowed
+	// (e.g. 0.5, 2.5).
+	CPU float64 `json:"cpu,omitempty" yaml:"cpu,omitempty"`
+
+	// MemoryMB is the memory limit in mebibytes.
+	MemoryMB int64 `json:"memoryMB,omitempty" yaml:"memoryMB,omitempty"`
+
+	// GPU is the GPU allocation as a string. Format is consumer-defined
+	// (e.g. "1", "all", a vendor-specific selector).
+	GPU string `json:"gpu,omitempty" yaml:"gpu,omitempty"`
 }
 
 // NetworkPolicy defines network rules for which external domains the agent
@@ -251,6 +295,12 @@ type Artifact struct {
 	// Extends is the optional parent kit name for single-parent inheritance.
 	Extends string `json:"extends,omitempty"`
 
+	// Locked lists dotted YAML paths (e.g. "agent.image") on this artifact
+	// that child kits must not override during single-parent inheritance.
+	// The spec library only validates well-formedness; enforcement lives
+	// in the consumer that performs the merge.
+	Locked []string `json:"locked,omitempty"`
+
 	// Network is the optional network policy.
 	Network *NetworkPolicy `json:"network,omitempty"`
 
@@ -355,6 +405,7 @@ func (p *OAuthPolicy) ResolvedResponseFields() OAuthResponseFields {
 type specFile struct {
 	Manifest    `yaml:",inline"`
 	Extends     string             `yaml:"extends,omitempty"`
+	Locked      []string           `yaml:"locked,omitempty"`
 	Agent       *agentBlock        `yaml:"agent,omitempty"`
 	Secrets     []string           `yaml:"secrets,omitempty"`
 	Egress      map[string]string  `yaml:"egress,omitempty"`
@@ -369,10 +420,10 @@ type specFile struct {
 
 // agentBlock groups agent-specific configuration.
 type agentBlock struct {
-	Image       string           `yaml:"image,omitempty"`
-	Entrypoint  *entrypointBlock `yaml:"entrypoint,omitempty"`
-	AIFilename  string           `yaml:"aiFilename,omitempty"`
-	Persistence string           `yaml:"persistence,omitempty"`
+	Image      string           `yaml:"image,omitempty"`
+	Entrypoint *entrypointBlock `yaml:"entrypoint,omitempty"`
+	AIFilename string           `yaml:"aiFilename,omitempty"`
+	Resources  *Resources       `yaml:"resources,omitempty"`
 }
 
 // entrypointBlock describes the agent's process launch configuration.
