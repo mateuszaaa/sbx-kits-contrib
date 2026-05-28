@@ -11,23 +11,15 @@ agent:
   entrypoint:
     run: [pi]
 
-network:
-  serviceDomains:
-    api.anthropic.com: anthropic
-    console.anthropic.com: anthropic
-    claude.ai: anthropic
-  serviceAuth:
-    anthropic:
-      headerName: x-api-key
-      valueFormat: "%s"
-  allowedDomains:
-    - registry.npmjs.org
-
 credentials:
   sources:
     anthropic:
       env:
         - ANTHROPIC_API_KEY
+
+network:
+  allowedDomains:
+    - "host.docker.internal:8080"
 
 environment:
   proxyManaged:
@@ -38,3 +30,12 @@ commands:
     - command: "npm config set proxy $HTTP_PROXY && npm config set https-proxy $HTTP_PROXY && i=0; while [ $i -lt 5 ]; do npm install -g --maxsockets=1 --fetch-timeout=600000 @mariozechner/pi-coding-agent && break; i=$((i+1)); echo \"Retrying ($i/5)...\"; done"
       user: "1000"
       description: "Configure npm proxy and install pi coding agent globally (with retries)"
+    - command: "npm install -g --maxsockets=1 --fetch-timeout=600000 pi-web-access"
+      user: "1000"
+      description: "Install pi-btw extension globally"
+    - command: "npm install -g --maxsockets=1 --fetch-timeout=600000 pi-btw"
+      user: "1000"
+      description: "Install pi-web-access extension globally"
+    - command: "apt update && DEBIAN_FRONTEND=noninteractive apt install -y -qq --no-install-recommends yt-dlp"
+      user: "0"
+      description: "Install yt-dlp for video/audio downloading"

@@ -1,0 +1,41 @@
+schemaVersion: "1"
+kind: agent
+name: claude-custom
+displayName: Claude Code (Custom)
+description: Drop-in replacement for the built-in claude agent with support for injecting static files (e.g. a global CLAUDE.md or settings.json) via the files/ directory.
+
+agent:
+  image: "docker/sandbox-templates:claude-code-docker"
+  aiFilename: CLAUDE.md
+  persistence: persistent
+  entrypoint:
+    run: [claude, "--dangerously-skip-permissions"]
+
+network:
+  serviceDomains:
+    api.anthropic.com: anthropic
+    console.anthropic.com: anthropic
+  serviceAuth:
+    anthropic:
+      headerName: x-api-key
+      valueFormat: "%s"
+  allowedDomains:
+    - "claude.com:443"
+    - "github.com:443"
+    - "objects.githubusercontent.com:443"
+
+credentials:
+  sources:
+    anthropic:
+      env:
+        - ANTHROPIC_API_KEY
+
+environment:
+  variables:
+    IS_SANDBOX: "1"
+
+commands:
+  install:
+    - command: "curl -fsSL https://claude.ai/install.sh | bash"
+      user: "1000"
+      description: Install Claude Code

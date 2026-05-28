@@ -1,0 +1,9 @@
+{
+  "lastChangelogVersion": "0.74.0",
+  "defaultProvider": "llama-local",
+  "defaultModel": "qwen3-27b",
+  "packages": [
+    "npm:pi-web-access",
+    "npm:pi-btw"
+  ]
+}
